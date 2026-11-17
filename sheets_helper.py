@@ -1,110 +1,200 @@
 # -*- coding: utf-8 -*-
+"""
+Чтение данных из Google Таблицы для бота (актуальная таблица).
+
+Что изменилось по сравнению со старой версией:
+  * SPREADSHEET_ID указывает на рабочую таблицу «Аня, тебе сюда»;
+  * колонки ищутся по нескольким вариантам названий — переименование
+    в таблице больше не даёт тихих нулей;
+  * даты приводятся к виду dd.MM.yyyy (его ждут база и ai_helper);
+  * читается по имени листа через gviz, как раньше — таблица должна быть
+    открыта по ссылке (просмотр для всех, у кого есть ссылка).
+
+API модуля не менялся: get_cars / get_earnings / get_cash / get_balances.
+"""
 import csv
 import io
+import os
 import re
-import urllib.request
 import urllib.parse
+import urllib.request
+from datetime import datetime
 
-# ID твоей таблицы (из ссылки на редактирование)
-SPREADSHEET_ID = "1Gy7kdaABWojG5EyEENZio98ofp5t_yqipUt1g_VXmdc"
+# «Аня, тебе сюда» — рабочая таблица
+SPREADSHEET_ID = os.getenv("SHEET_ID", "1qxUa-C-eEKxUUhFjO4boPBnsPAqEYYBHpTUWDWFkme8")
+
+CACHE_SECONDS = 300
+_cache = {}
+
 
 def _num(v):
     if v is None or v == "":
         return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
     s = str(v).replace("\xa0", "").replace(" ", "").replace("₽", "").replace("р.", "")
     s = re.sub(r"[^\d.\-]", "", s.replace(",", "."))
     try:
         return float(s)
-    except:
+    except Exception:
         return 0.0
 
+
+def _col(row, *names):
+    """Первое непустое значение по списку возможных названий колонки."""
+    for n in names:
+        if n in row and row[n] not in (None, ""):
+            return row[n]
+    return ""
+
+
+def _date(v):
+    """01.10.2026 | 2026-10-01 | serial → dd.MM.yyyy"""
+    if v is None or v == "":
+        return ""
+    if isinstance(v, datetime):
+        return v.strftime("%d.%m.%Y")
+    s = str(v).strip()
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})", s)
+    if m:
+        return "%02d.%02d.%s" % (int(m.group(1)), int(m.group(2)), m.group(3))
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return "%s.%s.%s" % (m.group(3), m.group(2), m.group(1))
+    if re.match(r"^\d{5}(\.\d+)?$", s):
+        from datetime import timedelta
+        d = datetime(1899, 12, 30) + timedelta(days=float(s))
+        return d.strftime("%d.%m.%Y")
+    return s
+
+
+def _plate(s):
+    s = str(s or "").strip().upper()
+    return "".join(ch for ch in s if not ch.isspace() and ch != "-")
+
+
 def read_sheet(sheet_name):
-    """Читает лист по его НАЗВАНИЮ, а не по gid."""
-    sheet_encoded = urllib.parse.quote(sheet_name)
-    url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={sheet_encoded}"
-    
+    """Читает лист по его названию через gviz (нужен доступ по ссылке)."""
+    import time
+
+    cached = _cache.get(sheet_name)
+    if cached and time.time() - cached[0] < CACHE_SECONDS:
+        return cached[1]
+
+    url = (
+        "https://docs.google.com/spreadsheets/d/"
+        + SPREADSHEET_ID
+        + "/gviz/tq?tqx=out:csv&sheet="
+        + urllib.parse.quote(sheet_name)
+    )
     try:
-        resp = urllib.request.urlopen(url, timeout=30)
-        data = resp.read().decode("utf-8")
-        
-        if "<html" in data[:100].lower() or "<!doctype" in data[:100].lower():
-            print(f"Ошибка: Google вернул HTML вместо CSV для листа {sheet_name}")
+        req = urllib.request.Request(url, headers={"User-Agent": "taxopark-bot/2"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read().decode("utf-8-sig")
+        head = data[:200].lower()
+        if "<html" in head or "<!doctype" in head:
+            print("Ошибка доступа к листу «%s»: таблица не открыта по ссылке" % sheet_name)
             return []
-            
-        return list(csv.DictReader(io.StringIO(data)))
+        rows = list(csv.DictReader(io.StringIO(data)))
+        _cache[sheet_name] = (time.time(), rows)
+        return rows
     except Exception as e:
-        print(f"Ошибка чтения листа {sheet_name}: {e}")
+        print("Ошибка чтения листа %s: %s" % (sheet_name, e))
         return []
 
+
 def get_cars():
-    rows = read_sheet("Автомобили")
     cars = {}
-    for r in rows:
-        gos = (r.get("Госномер") or "").strip().upper()
+    for r in read_sheet("Автомобили"):
+        gos = str(_col(r, "Госномер")).strip().upper()
         if not gos:
             continue
-        owner = (r.get("Владелец") or "").strip() or "Александр Борисович"
-        brand = (r.get("Марка") or "").strip()
-        model = (r.get("Модель") or "").strip()
+        brand = str(_col(r, "Марка", "Модель")).strip()
+        model = str(_col(r, "Модель")).strip()
+        owner = str(_col(r, "Владелец")).strip() or "Александр Борисович"
         cars[gos] = {"gos": gos, "owner": owner, "brand": brand, "model": model}
     return cars
 
+
 def get_earnings():
-    rows = read_sheet("Ввод данных")
     cars = get_cars()
-    result = []
-    for r in rows:
-        date_v = (r.get("Дата") or "").strip()
-        gos = (r.get("Госномер") or "").strip().upper()
-        driver = (r.get("Водитель") or "").strip()
-        amount = _num(r.get("Заработок") or 0)
-        owner_col = (r.get("Владелец") or "").strip()
-        if not date_v or not gos or amount <= 0:
+    out = []
+    for r in read_sheet("Ввод данных"):
+        date = _date(_col(r, "Дата"))
+        gos = str(_col(r, "Госномер")).strip().upper()
+        amount = _num(_col(r, "Заработок"))
+        if not date or not gos or amount <= 0:
             continue
-        owner = owner_col
+        owner = str(_col(r, "Владелец")).strip()
         if not owner:
-            if gos in cars:
-                owner = cars[gos]["owner"]
-            else:
-                owner = "?"
-        result.append({
-            "date": date_v,
+            owner = cars.get(_plate(gos), {}).get("owner") or cars.get(gos, {}).get("owner") or "?"
+        out.append({
+            "date": date,
             "gos": gos,
-            "driver": driver,
+            "driver": str(_col(r, "Водитель")).strip(),
             "amount": amount,
             "owner": owner,
         })
-    return result
+    return out
+
 
 def get_cash():
-    rows = read_sheet("Касса")
-    result = []
-    for r in rows:
-        date_v = (r.get("Дата") or "").strip()
-        op_type = (r.get("Тип операции") or "").strip()
-        amount = _num(r.get("Сумма") or 0)
-        if not date_v or amount <= 0:
+    out = []
+    for r in read_sheet("Касса"):
+        date = _date(_col(r, "Дата"))
+        amount = _num(_col(r, "Сумма"))
+        if not date or amount <= 0:
             continue
-        result.append({
-            "date": date_v,
-            "type": op_type,
-            "category": (r.get("Категория") or "").strip(),
+        out.append({
+            "date": date,
+            "type": str(_col(r, "Тип операции", "Тип")).strip(),
+            "category": str(_col(r, "Категория")).strip(),
             "sum": amount,
-            "account": (r.get("Счёт") or "").strip(),
-            "who": (r.get("Получил из кассы") or "").strip(),
-            "comment": (r.get("Комментарий") or "").strip(),
+            "account": str(_col(r, "Счёт")).strip(),
+            "who": str(_col(r, "Получил из кассы", "Кому/Кто", "Куда")).strip(),
+            "comment": str(_col(r, "Комментарий")).strip(),
         })
-    return result
+    return out
+
+
+def _last_by_date(rows):
+    """Последняя строка по дате (не по порядку в листе)."""
+    best, best_key = None, None
+    for r in rows:
+        d = _date(_col(r, "Дата"))
+        m = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", d)
+        if not m:
+            continue
+        key = (m.group(3), m.group(2), m.group(1))
+        if best_key is None or key > best_key:
+            best, best_key = r, key
+    return best
+
 
 def get_balances():
     rows = read_sheet("Балансы")
     if not rows:
         return None
-    last = rows[-1]
+    last = _last_by_date(rows) or rows[-1]
+    card = _num(_col(last, "Карта (₽)", "Карта (Альфа)", "Карта"))
+    account = _num(_col(last, "Счёт (₽)", "Счёт (Переводы)", "Счёт"))
+    cash = _num(_col(last, "Нал (₽)", "Наличные (₽)", "Наличные"))
+    total = _num(_col(last, "Всего (₽)", "Всего")) or (card + account + cash)
     return {
-        "date": (last.get("Дата") or "").strip(),
-        "card": _num(last.get("Карта (₽)") or 0),
-        "account": _num(last.get("Счёт (₽)") or 0),
-        "cash": _num(last.get("Нал (₽)") or 0),
-        "total": _num(last.get("Всего (₽)") or 0),
+        "date": _date(_col(last, "Дата")),
+        "card": card,
+        "account": account,
+        "cash": cash,
+        "total": total,
     }
+
+
+if __name__ == "__main__":
+    cars = get_cars()
+    earnings = get_earnings()
+    cash = get_cash()
+    bal = get_balances()
+    print("машин:", len(cars))
+    print("заработков:", len(earnings), "| сумма:", int(sum(e["amount"] for e in earnings)))
+    print("касса:", len(cash), "| приход:", int(sum(c["sum"] for c in cash if c["type"].lower().startswith("приход"))))
+    print("баланс:", bal)
