@@ -189,12 +189,39 @@ def get_balances():
     }
 
 
+def get_repairs():
+    """Ремонты: дата, машина, работы, запчасти, работа, итого, пробег, простой."""
+    out = []
+    for r in read_sheet("Ремонты"):
+        date = _date(_col(r, "Дата"))
+        gos = str(_col(r, "Госномер")).strip().upper()
+        if not date or not gos:
+            continue
+        part_cost = _num(_col(r, "Стоимость запчасти", "Стоимость запчастей"))
+        work_cost = _num(_col(r, "Стоимость работы"))
+        total = _num(_col(r, "Итого")) or (part_cost + work_cost)
+        out.append({
+            "date": date,
+            "gos": gos,
+            "work": str(_col(r, "Наименование работ", "Работа")).strip(),
+            "firm": str(_col(r, "Фирма запчасти", "Фирма")).strip(),
+            "part_cost": part_cost,
+            "work_cost": work_cost,
+            "total": total,
+            "mileage": _num(_col(r, "Пробег (км)", "Пробег")),
+            "idle_cost": _num(_col(r, "Простой (₽)", "Простой")),
+        })
+    return out
+
+
 if __name__ == "__main__":
     cars = get_cars()
     earnings = get_earnings()
     cash = get_cash()
     bal = get_balances()
+    rep = get_repairs()
     print("машин:", len(cars))
     print("заработков:", len(earnings), "| сумма:", int(sum(e["amount"] for e in earnings)))
     print("касса:", len(cash), "| приход:", int(sum(c["sum"] for c in cash if c["type"].lower().startswith("приход"))))
+    print("ремонтов:", len(rep), "| на сумму:", int(sum(x["total"] for x in rep)))
     print("баланс:", bal)
