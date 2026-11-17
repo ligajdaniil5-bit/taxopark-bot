@@ -19,6 +19,8 @@ load_dotenv()
 from paths import DB_PATH
 from sheets_helper import get_cars, get_earnings, get_cash, get_balances, get_repairs
 
+HISTORY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repairs_history.csv")
+
 OR_KEY = os.getenv("OPENROUTER_KEY", "")
 GQ_KEY = os.getenv("GROQ_KEY", "")
 
@@ -41,6 +43,7 @@ earnings(id, date, gos, driver, amount, owner)
 cash(id, date, type, category, sum, account, who, comment)
 balances(id, date, card, account, cash, total)
 repairs(id, date, gos, work, firm, part_cost, work_cost, total, mileage, idle_cost)
+repairs_history(id, plate, date, work, part_cost, work_cost, total, mileage)
 
 Rules:
 1. Generate ONLY one SELECT or WITH ... SELECT query.
@@ -65,7 +68,12 @@ Rules:
 19. To find repair costs for a car use gos (license plate), for example: SELECT SUM(total) FROM repairs WHERE gos = 'K904OX'
 20. Repair dates use the same dd.MM.yyyy format: date LIKE '%.10.2026'
 
-JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos
+21. repairs = официальные ремонты из таблицы (с суммами, учитываются в деньгах).
+22. repairs_history = подробная история работ из карточек машин (может не совпадать с repairs, суммы считать НЕ по ней).
+23. На вопросы «что делали с машиной», «когда был ремонт», «какой пробег» используй repairs_history.
+24. На вопросы про деньги на ремонты используй только repairs.
+
+JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos AND cars.plate = repairs_history.plate
 """
 
 OWNERS = {
@@ -112,6 +120,20 @@ def _build_data_db():
                    r.get("part_cost", 0), r.get("work_cost", 0), r.get("total", 0),
                    r.get("mileage", 0), r.get("idle_cost", 0)))
 
+    # история ремонтов из файла карточек
+    c.execute("CREATE TABLE repairs_history (id TEXT, plate TEXT, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)")
+    if os.path.exists(HISTORY_CSV):
+        import csv as _csv
+        try:
+            with open(HISTORY_CSV, encoding="utf-8") as _f:
+                for _i, _r in enumerate(_csv.DictReader(_f)):
+                    c.execute("INSERT INTO repairs_history VALUES (?,?,?,?,?,?,?,?)",
+                              ("H%d" % _i, _r.get("plate", ""), _r.get("date", ""), _r.get("work", ""),
+                               float(_r.get("part_cost") or 0), float(_r.get("work_cost") or 0),
+                               float(_r.get("total") or 0), float(_r.get("mileage") or 0)))
+        except Exception as _e:
+            print("история ремонтов не загружена: %s" % _e)
+
     conn.commit()
     return conn
 
@@ -124,6 +146,7 @@ def _persist_to_file(mem_conn):
         "cash": "CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)",
         "balances": "CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)",
         "repairs": "CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)",
+        "repairs_history": "CREATE TABLE repairs_history (id TEXT, plate TEXT, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)",
     }
     try:
         with sqlite3.connect(DB_PATH, timeout=15) as f:
@@ -143,7 +166,7 @@ def _persist_to_file(mem_conn):
 def _build_from_file():
     """Резервный вариант: берём последний сохранённый снимок из файловой базы."""
     conn = sqlite3.connect(":memory:")
-    tables = ["cars", "earnings", "cash", "balances", "repairs"]
+    tables = ["cars", "earnings", "cash", "balances", "repairs", "repairs_history"]
     try:
         src = sqlite3.connect(DB_PATH, timeout=10)
         for t in tables:
@@ -208,7 +231,7 @@ def schema():
     try:
         c = data_db().cursor()
         out = []
-        for t in ("cars", "earnings", "cash", "balances", "repairs"):
+        for t in ("cars", "earnings", "cash", "balances", "repairs", "repairs_history"):
             n = c.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
             cols = [r[1] for r in c.execute("PRAGMA table_info(" + t + ")").fetchall()]
             out.append("%s (%d): %s" % (t, n, ", ".join(cols)))
@@ -300,7 +323,7 @@ def ask_ai(q):
     sc = schema()
     owner = find_owner(q)
     hint = "Owner mentioned: " + owner + "\n" if owner else ""
-    joins = "JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos\n"
+    joins = "JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos AND cars.plate = repairs_history.plate\n"
     user_msg = "Schema:\n" + sc + "\n" + joins + hint + "Question: " + q
 
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
