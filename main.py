@@ -472,6 +472,18 @@ async def on_text(m: Message):
         return
     question = m.text.strip()
 
+    # отчёт по простоям: «сколько машин стояло», «причины простоя», «запил»
+    try:
+        from aiogram.types import FSInputFile as _FSI
+        from idle_report import wants_idle_report, build_idle_image
+        if wants_idle_report(question):
+            path, caption = await asyncio.to_thread(build_idle_image, question)
+            if path:
+                await m.answer_photo(_FSI(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[idle]", e)
+
     # отчёт картинкой: «распиши кто сколько заработал», «скрин», «по водителям»
     try:
         from aiogram.types import FSInputFile
