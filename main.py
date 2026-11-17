@@ -471,6 +471,19 @@ async def on_text(m: Message):
     if not is_owner(m.from_user.id) or not m.text:
         return
     question = m.text.strip()
+
+    # отчёт картинкой: «распиши кто сколько заработал», «скрин», «по водителям»
+    try:
+        from aiogram.types import FSInputFile
+        from earnings_report import wants_image_report, build_earnings_image
+        if wants_image_report(question):
+            path, caption = await asyncio.to_thread(build_earnings_image, question)
+            if path:
+                await m.answer_photo(FSInputFile(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[report]", e)
+
     await m.answer("🤔 Думаю... 5-15 секунд.")
 
     started = time.perf_counter()
