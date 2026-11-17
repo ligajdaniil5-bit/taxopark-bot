@@ -472,6 +472,51 @@ async def on_text(m: Message):
         return
     question = m.text.strip()
 
+@dp.message(F.voice)
+async def on_voice(m: Message):
+    """Голосовой вопрос: расшифровываем и отвечаем как на обычный текст."""
+    if not is_owner(m.from_user.id):
+        return
+    await m.answer("🎤 Расшифровываю…")
+    try:
+        import io as _io
+        from voice import transcribe
+        buf = _io.BytesIO()
+        await bot.download(m.voice, destination=buf)
+        text = await asyncio.to_thread(transcribe, buf.getvalue())
+    except Exception as e:
+        await m.answer("Не удалось распознать голос: " + str(e)[:200])
+        return
+    if not text:
+        await m.answer("Не разобрал речь, попробуйте ещё раз.")
+        return
+    await m.answer("🎤 «" + text + "»")
+
+    try:
+        from aiogram.types import FSInputFile as _FSI
+        from idle_report import wants_idle_report, build_idle_image
+        if wants_idle_report(text):
+            path, caption = await asyncio.to_thread(build_idle_image, text)
+            if path:
+                await m.answer_photo(_FSI(path), caption=caption[:1000])
+                return
+        from earnings_report import wants_image_report, build_earnings_image
+        if wants_image_report(text):
+            path, caption = await asyncio.to_thread(build_earnings_image, text)
+            if path:
+                await m.answer_photo(_FSI(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[voice report]", e)
+
+    try:
+        result = await asyncio.to_thread(ask_ai, text)
+        answer = result[0] if isinstance(result, tuple) and result else str(result)
+    except Exception as e:
+        answer = "Ошибка обработки: " + str(e)[:200]
+    await m.answer(answer[:4000])
+
+
     # отчёт по простоям: «сколько машин стояло», «причины простоя», «запил»
     try:
         from aiogram.types import FSInputFile as _FSI
