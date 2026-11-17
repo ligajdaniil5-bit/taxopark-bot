@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Картинка-отчёт по заработку: кто сколько заработал + разбивка по владельцам.
+Картинка-отчёт по заработку за конкретную дату.
 
-Бот присылает её вместо текстового списка, когда просят «распиши», «скрин»,
-«кто сколько заработал» и т.п.
+Показывает ВСЕ машины парка (в том числе без заработка — выходной, не оплачен)
+и разбивку по владельцам. Бот присылает её вместо текстового списка.
 """
 import os
 import re
 import tempfile
-from datetime import datetime
 
 import matplotlib
 matplotlib.use("Agg")
@@ -21,25 +20,29 @@ rcParams["font.family"] = "DejaVu Sans"
 
 TRIGGERS = (
     "кто сколько", "распиши", "расписать", "по водителям", "по машинам",
-    "скрин", "скриншот", "таблиц", "список", "разбив",
+    "скрин", "скриншот", "таблиц", "список", "разбив", "попап", "отчет", "отчёт", "сводка",
 )
 
 
-def _norm(v):
-    import re as _re
+def _num(v):
     s = str(v or "").replace("\xa0", "").replace(" ", "").replace("₽", "").replace(",", ".")
-    s = _re.sub(r"[^\d.\-]", "", s)
+    s = re.sub(r"[^\d.\-]", "", s)
     try:
         return float(s)
     except Exception:
         return 0.0
 
 
+def _fmt(n):
+    return "{:,.0f}".format(n).replace(",", " ")
+
+
 def wants_image_report(question):
     q = (question or "").lower()
     if not any(t in q for t in TRIGGERS):
         return False
-    return ("заработ" in q) or ("заработал" in q) or ("скрин" in q) or ("водител" in q)
+    return ("заработ" in q or "заработал" in q or "скрин" in q
+            or "водител" in q or "попап" in q or "машин" in q or "отчёт" in q or "отчет" in q)
 
 
 def _pick_date(question, earnings):
@@ -53,92 +56,99 @@ def _pick_date(question, earnings):
         mm = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", d)
         if mm:
             dates.append((mm.group(3), mm.group(2), mm.group(1), d))
-    if not dates:
-        return None
-    return max(dates)[3]
-
-
-def _fmt(n):
-    return "{:,.0f}".format(n).replace(",", " ")
+    return max(dates)[3] if dates else None
 
 
 def build_earnings_image(question):
-    """Возвращает (путь к png, подпись) или (None, текст ошибки)."""
+    """Возвращает (путь к png, подпись) или (None, текст)."""
     earnings = get_earnings()
-    if not earnings:
-        return None, "Нет данных по заработку"
+    cars = get_cars()
+    if not earnings and not cars:
+        return None, "Нет данных"
 
     date = _pick_date(question, earnings)
     if not date:
         return None, "Не удалось определить дату"
 
-    rows = [e for e in earnings if (e.get("date") or "").strip() == date]
-    if not rows:
-        return None, "За %s записей нет" % date
+    # сколько заработала каждая машина за день
+    per_car = {}
+    for e in earnings:
+        if (e.get("date") or "").strip() != date:
+            continue
+        gos = (e.get("gos") or "").strip().upper()
+        if not gos:
+            continue
+        per_car[gos] = per_car.get(gos, 0.0) + _num(e.get("amount"))
 
-    by_driver = {}
+    # все машины парка + те, что встречались в заработке
+    all_plates = set(cars.keys()) | set(per_car.keys())
+    rows = []
+    for plate in all_plates:
+        info = cars.get(plate, {})
+        rows.append({
+            "plate": plate,
+            "amount": per_car.get(plate, 0.0),
+            "owner": (info.get("owner") or "").strip() or "?",
+        })
+    rows.sort(key=lambda r: (-r["amount"], r["plate"]))
+
     by_owner = {}
-    for e in rows:
-        car = (e.get("gos") or "").strip().upper() or "(без номера)"
-        by_driver[car] = by_driver.get(car, 0.0) + _norm(e.get("amount"))
-        owner = (e.get("owner") or "?").strip() or "?"
-        by_owner[owner] = by_owner.get(owner, 0.0) + _norm(e.get("amount"))
-
-    drivers = sorted(by_driver.items(), key=lambda x: -x[1])
+    for r in rows:
+        by_owner[r["owner"]] = by_owner.get(r["owner"], 0.0) + r["amount"]
     owners = sorted(by_owner.items(), key=lambda x: -x[1])
-    total = sum(by_driver.values())
 
-    # обрезаем длинный список, чтобы влезло на картинку
-    shown = drivers[:22]
-    rest = drivers[22:]
+    total = sum(r["amount"] for r in rows)
+    earned_count = sum(1 for r in rows if r["amount"] > 0)
 
-    row_in = 0.32
-    table_in = max(len(shown) + 2, len(owners) + 3) * row_in
-    fig_h = table_in + 2.3
-    fig = plt.figure(figsize=(9, fig_h), dpi=130)
+    row_in = 0.26 if len(rows) > 30 else 0.30
+    table_in = (len(rows) + 2) * row_in
+    fig_h = table_in + 2.2
+    fig = plt.figure(figsize=(9.5, fig_h), dpi=130)
     ax_h = table_in / fig_h
-    ax_bottom = 1 - 0.10 - ax_h
+    ax_bottom = 1 - 0.09 - ax_h
     fig.patch.set_facecolor("white")
 
-    fig.text(0.5, 0.975, "ЗАРАБОТОК ЗА %s" % date, ha="center", va="top",
-             fontsize=17, fontweight="bold", color="#111827")
-    fig.text(0.5, 0.945, "всего %s ₽ · машин с заработком: %d" % (_fmt(total), len(rows)),
-             ha="center", va="top", fontsize=11, color="#4b5563")
+    fig.text(0.5, 0.985, "ЗАРАБОТОК ЗА %s" % date, ha="center", va="top",
+             fontsize=16, fontweight="bold", color="#111827")
+    fig.text(0.5, 0.958, "всего %s ₽ · машин %d, с заработком %d" % (_fmt(total), len(rows), earned_count),
+             ha="center", va="top", fontsize=10.5, color="#4b5563")
 
-    # таблица машин
-    ax1 = fig.add_axes([0.04, ax_bottom, 0.58, ax_h])
+    ax1 = fig.add_axes([0.04, ax_bottom, 0.60, ax_h])
     ax1.axis("off")
-    ax1.set_title("По машинам", fontsize=13, fontweight="bold", loc="left", pad=8, color="#1f2937")
+    ax1.set_title("По машинам", fontsize=12.5, fontweight="bold", loc="left", pad=6, color="#1f2937")
 
     cell = [["№", "Машина", "Сумма, ₽"]]
-    for i, (name, amount) in enumerate(shown, start=1):
-        cell.append([str(i), name[:24], _fmt(amount)])
-    if rest:
-        cell.append(["…", "остальные (%d)" % len(rest), _fmt(sum(a for _, a in rest))])
+    for i, r in enumerate(rows, start=1):
+        cell.append([str(i), r["plate"], _fmt(r["amount"]) if r["amount"] else "—"])
+    cell.append(["", "ИТОГО", _fmt(total)])
 
-    tbl = ax1.table(cellText=cell, loc="upper center", cellLoc="left", colWidths=[0.09, 0.56, 0.35])
+    tbl = ax1.table(cellText=cell, loc="upper center", cellLoc="left", colWidths=[0.10, 0.55, 0.35])
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(10)
-    tbl.scale(1, 1.35)
+    tbl.set_fontsize(8.5 if len(rows) > 30 else 9.5)
+    tbl.scale(1, 1.15)
     for (r, c), cellobj in tbl.get_celld().items():
         cellobj.set_edgecolor("#e5e7eb")
         if r == 0:
             cellobj.set_facecolor("#1f2937")
             cellobj.set_text_props(color="white", fontweight="bold")
+        elif r == len(cell) - 1:
+            cellobj.set_facecolor("#ecfdf5")
+            cellobj.set_text_props(fontweight="bold")
         elif r % 2 == 0:
             cellobj.set_facecolor("#f9fafb")
 
-    # разбивка по владельцам
-    ax2 = fig.add_axes([0.64, ax_bottom, 0.34, ax_h])
+    # разбивка по владельцам — справа сверху
+    box_h = min(ax_h, 0.30)
+    ax2 = fig.add_axes([0.68, 1 - 0.09 - box_h, 0.30, box_h])
     ax2.axis("off")
-    ax2.set_title("По владельцам", fontsize=13, fontweight="bold", loc="left", pad=8, color="#1f2937")
+    ax2.set_title("По владельцам", fontsize=12.5, fontweight="bold", loc="left", pad=6, color="#1f2937")
     cell2 = [["Владелец", "Сумма, ₽"]]
     for name, amount in owners:
         cell2.append([name, _fmt(amount)])
     cell2.append(["ИТОГО", _fmt(total)])
     tbl2 = ax2.table(cellText=cell2, loc="upper center", cellLoc="left", colWidths=[0.70, 0.30])
     tbl2.auto_set_font_size(False)
-    tbl2.set_fontsize(9)
+    tbl2.set_fontsize(9.5)
     tbl2.scale(1, 1.5)
     for (r, c), cellobj in tbl2.get_celld().items():
         cellobj.set_edgecolor("#e5e7eb")
@@ -153,23 +163,22 @@ def build_earnings_image(question):
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
-    # обрезаем белые поля, чтобы в телеграме картинка была плотной
     try:
         from PIL import Image, ImageChops
         img = Image.open(path).convert("RGB")
         bg = Image.new("RGB", img.size, (255, 255, 255))
         box = ImageChops.difference(img, bg).getbbox()
         if box:
-            pad = 12
+            pad = 14
             box = (max(0, box[0] - pad), max(0, box[1] - pad),
                    min(img.width, box[2] + pad), min(img.height, box[3] + pad))
             img.crop(box).save(path)
-    except Exception as _e:
-        print("обрезать не удалось: %s" % _e)
+    except Exception as e:
+        print("обрезать не удалось: %s" % e)
 
-    lines = ["Заработок за %s — %s ₽ (по %d машинам)" % (date, _fmt(total), len(by_driver)), ""]
+    lines = ["Заработок за %s — %s ₽" % (date, _fmt(total)),
+             "машин: %d, с заработком: %d" % (len(rows), earned_count), ""]
     for name, amount in owners:
         share = (amount / total * 100) if total else 0
         lines.append("%s: %s ₽ (%.0f%%)" % (name, _fmt(amount), share))
-    caption = "\n".join(lines)
-    return path, caption
+    return path, "\n".join(lines)
