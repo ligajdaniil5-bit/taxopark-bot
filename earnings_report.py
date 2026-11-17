@@ -79,8 +79,8 @@ def build_earnings_image(question):
     by_driver = {}
     by_owner = {}
     for e in rows:
-        driver = (e.get("driver") or "").strip() or "(без имени)"
-        by_driver[driver] = by_driver.get(driver, 0.0) + _norm(e.get("amount"))
+        car = (e.get("gos") or "").strip().upper() or "(без номера)"
+        by_driver[car] = by_driver.get(car, 0.0) + _norm(e.get("amount"))
         owner = (e.get("owner") or "?").strip() or "?"
         by_owner[owner] = by_owner.get(owner, 0.0) + _norm(e.get("amount"))
 
@@ -105,12 +105,12 @@ def build_earnings_image(question):
     fig.text(0.5, 0.945, "всего %s ₽ · машин с заработком: %d" % (_fmt(total), len(rows)),
              ha="center", va="top", fontsize=11, color="#4b5563")
 
-    # таблица водителей
+    # таблица машин
     ax1 = fig.add_axes([0.04, ax_bottom, 0.58, ax_h])
     ax1.axis("off")
-    ax1.set_title("По водителям", fontsize=13, fontweight="bold", loc="left", pad=8, color="#1f2937")
+    ax1.set_title("По машинам", fontsize=13, fontweight="bold", loc="left", pad=8, color="#1f2937")
 
-    cell = [["№", "Водитель", "Сумма, ₽"]]
+    cell = [["№", "Машина", "Сумма, ₽"]]
     for i, (name, amount) in enumerate(shown, start=1):
         cell.append([str(i), name[:24], _fmt(amount)])
     if rest:
@@ -167,7 +167,7 @@ def build_earnings_image(question):
     except Exception as _e:
         print("обрезать не удалось: %s" % _e)
 
-    lines = ["Заработок за %s — %s ₽" % (date, _fmt(total)), ""]
+    lines = ["Заработок за %s — %s ₽ (по %d машинам)" % (date, _fmt(total), len(by_driver)), ""]
     for name, amount in owners:
         share = (amount / total * 100) if total else 0
         lines.append("%s: %s ₽ (%.0f%%)" % (name, _fmt(amount), share))
