@@ -64,6 +64,7 @@ Rules:
 16. In table cash the money column is called "sum", not amount.
 17. gross income of drivers is in earnings.amount.
 
+17a. Plates may be written in any case: use LOWER(plate) = LOWER('x') or rely on COLLATE NOCASE.
 18. Repairs are in the repairs table: part_cost + work_cost = total.
 19. To find repair costs for a car use gos (license plate), for example: SELECT SUM(total) FROM repairs WHERE gos = 'K904OX'
 20. Repair dates use the same dd.MM.yyyy format: date LIKE '%.10.2026'
@@ -89,8 +90,8 @@ def _build_data_db():
     """Собирает свежую базу из Google Таблицы в память."""
     conn = sqlite3.connect(":memory:")
     c = conn.cursor()
-    c.execute("CREATE TABLE cars (plate TEXT, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)")
-    c.execute("CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT, driver TEXT, amount REAL, owner TEXT)")
+    c.execute("CREATE TABLE cars (plate TEXT COLLATE NOCASE, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)")
+    c.execute("CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, driver TEXT, amount REAL, owner TEXT)")
     c.execute("CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)")
     c.execute("CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)")
 
@@ -113,7 +114,7 @@ def _build_data_db():
         c.execute("INSERT INTO balances VALUES (?,?,?,?,?,?)",
                   ("B1", bal["date"], bal["card"], bal["account"], bal["cash"], bal["total"]))
 
-    c.execute("CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)")
+    c.execute("CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)")
     for i, r in enumerate(get_repairs()):
         c.execute("INSERT INTO repairs VALUES (?,?,?,?,?,?,?,?,?,?)",
                   ("R%d" % i, r["date"], r["gos"], r.get("work", ""), r.get("firm", ""),
@@ -121,7 +122,7 @@ def _build_data_db():
                    r.get("mileage", 0), r.get("idle_cost", 0)))
 
     # история ремонтов из файла карточек
-    c.execute("CREATE TABLE repairs_history (id TEXT, plate TEXT, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)")
+    c.execute("CREATE TABLE repairs_history (id TEXT, plate TEXT COLLATE NOCASE, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)")
     if os.path.exists(HISTORY_CSV):
         import csv as _csv
         try:
@@ -141,12 +142,12 @@ def _build_data_db():
 def _persist_to_file(mem_conn):
     """Кладёт собранные данные в файловую базу — её читают графики и выгрузки."""
     tables = {
-        "cars": "CREATE TABLE cars (plate TEXT, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)",
-        "earnings": "CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT, driver TEXT, amount REAL, owner TEXT)",
+        "cars": "CREATE TABLE cars (plate TEXT COLLATE NOCASE, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)",
+        "earnings": "CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, driver TEXT, amount REAL, owner TEXT)",
         "cash": "CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)",
         "balances": "CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)",
-        "repairs": "CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)",
-        "repairs_history": "CREATE TABLE repairs_history (id TEXT, plate TEXT, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)",
+        "repairs": "CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)",
+        "repairs_history": "CREATE TABLE repairs_history (id TEXT, plate TEXT COLLATE NOCASE, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)",
     }
     try:
         with sqlite3.connect(DB_PATH, timeout=15) as f:
