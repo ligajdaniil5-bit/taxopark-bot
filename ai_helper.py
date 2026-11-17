@@ -1,7 +1,17 @@
 # -*- coding: utf-8 -*-
+"""
+ИИ-слой бота: вопрос → SQL → ответ.
+
+Главное изменение: данные для SQL берутся НЕ из старого файла базы, а собираются
+в память прямо из Google Таблицы на момент вопроса. Поэтому ответы всегда по
+актуальным данным — без синхронизаций и без риска «база отстала на месяц».
+
+Служебные таблицы (qa_log, few_shot_pool) по-прежнему живут в файле базы.
+"""
 import os
 import re
 import sqlite3
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -12,28 +22,23 @@ from sheets_helper import get_cars, get_earnings, get_cash, get_balances
 OR_KEY = os.getenv("OPENROUTER_KEY", "")
 GQ_KEY = os.getenv("GROQ_KEY", "")
 
+# сколько секунд держать собранную базу в памяти
+DATA_TTL = int(os.getenv("DATA_TTL", "120"))
+
 WRITE_ACTIONS = {
-    sqlite3.SQLITE_INSERT,
-    sqlite3.SQLITE_UPDATE,
-    sqlite3.SQLITE_DELETE,
-    sqlite3.SQLITE_ALTER_TABLE,
-    sqlite3.SQLITE_DROP_TABLE,
-    sqlite3.SQLITE_DROP_INDEX,
-    sqlite3.SQLITE_DROP_VIEW,
-    sqlite3.SQLITE_CREATE_TABLE,
-    sqlite3.SQLITE_CREATE_INDEX,
-    sqlite3.SQLITE_CREATE_VIEW,
-    sqlite3.SQLITE_ATTACH,
-    sqlite3.SQLITE_DETACH,
+    sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_DROP_VIEW, sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_CREATE_VIEW, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH,
     sqlite3.SQLITE_PRAGMA,
 }
 
 SYSTEM_PROMPT = """You are an SQL generator EXCLUSIVELY for SQLite 3.
 
 Schema:
-cars(plate, owner, brand, model)
+cars(plate, plate_norm, owner, brand, model)
 earnings(id, date, gos, driver, amount, owner)
-cash(id, date, type, category, amount, who)
+cash(id, date, type, category, sum, account, who, comment)
 balances(id, date, card, account, cash, total)
 
 Rules:
@@ -41,9 +46,7 @@ Rules:
 2. NEVER use INSERT, UPDATE, DELETE, DROP.
 3. NEVER use PostgreSQL/MySQL syntax: EXTRACT, DATE_FORMAT, TO_DATE, ILIKE, MONTH(), YEAR().
 4. The date column is TEXT in format dd.MM.yyyy (example: 05.10.2026).
-5. Filter by month and year using:
-   substr(date, 4, 2) = '10' AND substr(date, 7, 4) = '2026'
-   OR simply: date LIKE '%.10.2026'
+5. Filter by month and year using: date LIKE '%.10.2026'
 6. Do NOT use strftime on dd.MM.yyyy dates.
 7. Use SQL aggregates: SUM, AVG, COUNT.
 8. Use only tables and columns from the schema.
@@ -51,33 +54,158 @@ Rules:
 10. If impossible, return exactly: NO_SQL
 11. Owner names in DB: 'Александр Борисович', 'Анна', 'Даниил'.
 12. If user asks about 'Данила', 'Данил' or 'Дане', use 'Даниил' in the SQL query.
-13. If user asks about 'Аня', use 'Анна'.
+13. If user asks about 'Аня', 'Ани', 'Анне', 'Анну', use 'Анна'.
 14. To count CARS for an owner, ALWAYS use: SELECT COUNT(*) FROM cars WHERE owner = 'Имя'
 15. Never count cars using the earnings table.
+16. In table cash the money column is called "sum", not amount.
+17. gross income of drivers is in earnings.amount.
 
 JOIN: cars.plate = earnings.gos
 """
 
-OWNERS = {"александр": "Александр Борисович", "анна": "Анна", "даниил": "Даниил", "данил": "Даниил"}
+OWNERS = {
+    "александр": "Александр Борисович", "борис": "Александр Борисович",
+    "анна": "Анна", "аня": "Анна", "ане": "Анна", "ани": "Анна", "анну": "Анна",
+    "даниил": "Даниил", "данил": "Даниил", "дане": "Даниил", "данила": "Даниил",
+}
+
+_data = {"db": None, "built": 0.0}
+
+
+def _build_data_db():
+    """Собирает свежую базу из Google Таблицы в память."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE cars (plate TEXT, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)")
+    c.execute("CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT, driver TEXT, amount REAL, owner TEXT)")
+    c.execute("CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)")
+    c.execute("CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)")
+
+    cars = get_cars()
+    for i, (plate, info) in enumerate(cars.items()):
+        c.execute("INSERT INTO cars VALUES (?,?,?,?,?)",
+                  (plate, plate, info.get("owner", ""), info.get("brand", ""), info.get("model", "")))
+
+    for i, e in enumerate(get_earnings()):
+        c.execute("INSERT INTO earnings VALUES (?,?,?,?,?,?)",
+                  ("E%d" % i, e["date"], e["gos"], e.get("driver", ""), e["amount"], e.get("owner", "")))
+
+    for i, x in enumerate(get_cash()):
+        c.execute("INSERT INTO cash VALUES (?,?,?,?,?,?,?,?)",
+                  ("C%d" % i, x["date"], x.get("type", ""), x.get("category", ""),
+                   x["sum"], x.get("account", ""), x.get("who", ""), x.get("comment", "")))
+
+    bal = get_balances()
+    if bal:
+        c.execute("INSERT INTO balances VALUES (?,?,?,?,?,?)",
+                  ("B1", bal["date"], bal["card"], bal["account"], bal["cash"], bal["total"]))
+
+    conn.commit()
+    return conn
+
+
+def _persist_to_file(mem_conn):
+    """Кладёт собранные данные в файловую базу — её читают графики и выгрузки."""
+    tables = {
+        "cars": "CREATE TABLE cars (plate TEXT, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)",
+        "earnings": "CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT, driver TEXT, amount REAL, owner TEXT)",
+        "cash": "CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)",
+        "balances": "CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)",
+    }
+    try:
+        with sqlite3.connect(DB_PATH, timeout=15) as f:
+            f.execute("PRAGMA journal_mode=WAL")
+            for t, ddl in tables.items():
+                f.execute("DROP TABLE IF EXISTS " + t)
+                f.execute(ddl)
+                rows = mem_conn.execute("SELECT * FROM " + t).fetchall()
+                if rows:
+                    marks = ",".join("?" * len(rows[0]))
+                    f.executemany("INSERT INTO " + t + " VALUES (" + marks + ")", rows)
+            f.commit()
+    except Exception as e:
+        print("не удалось обновить файловую базу: %s" % e)
+
+
+def _build_from_file():
+    """Резервный вариант: берём последний сохранённый снимок из файловой базы."""
+    conn = sqlite3.connect(":memory:")
+    tables = ["cars", "earnings", "cash", "balances"]
+    try:
+        src = sqlite3.connect(DB_PATH, timeout=10)
+        for t in tables:
+            try:
+                ddl = src.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone()
+                if not ddl or not ddl[0]:
+                    continue
+                conn.execute(ddl[0])
+                rows = src.execute("SELECT * FROM " + t).fetchall()
+                if rows:
+                    marks = ",".join("?" * len(rows[0]))
+                    conn.executemany("INSERT INTO " + t + " VALUES (" + marks + ")", rows)
+            except Exception:
+                continue
+        src.close()
+        conn.commit()
+    except Exception as e:
+        print("снимок из файла не прочитан: %s" % e)
+    return conn
+
+
+def data_db():
+    """Соединение с собранной базой; пересобирается раз в DATA_TTL секунд."""
+    now = time.time()
+    if _data["db"] is None or now - _data["built"] > DATA_TTL:
+        try:
+            if _data["db"] is not None:
+                _data["db"].close()
+        except Exception:
+            pass
+        _data["db"] = _build_data_db()
+        _data["built"] = now
+        try:
+            total = _data["db"].execute(
+                "SELECT (SELECT COUNT(*) FROM cars) + (SELECT COUNT(*) FROM earnings)"
+            ).fetchone()[0]
+        except Exception:
+            total = 0
+        if total > 0:
+            # данные пришли — обновляем файловый снимок
+            _persist_to_file(_data["db"])
+        else:
+            # таблица недоступна — работаем по последнему снимку
+            fallback = _build_from_file()
+            try:
+                fb_total = fallback.execute(
+                    "SELECT (SELECT COUNT(*) FROM cars) + (SELECT COUNT(*) FROM earnings)"
+                ).fetchone()[0]
+            except Exception:
+                fb_total = 0
+            if fb_total > 0:
+                _data["db"].close()
+                _data["db"] = fallback
+                print("таблица недоступна — использую последний снимок (%d записей)" % fb_total)
+            else:
+                fallback.close()
+    return _data["db"]
 
 
 def schema():
-    cn = sqlite3.connect(DB_PATH)
-    c = cn.cursor()
-    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    s = ""
-    for (t,) in c.fetchall():
-        c.execute("PRAGMA table_info(" + t + ")")
-        cols = [r[1] for r in c.fetchall()]
-        c.execute("SELECT COUNT(*) FROM " + t)
-        n = c.fetchone()[0]
-        s += t + " (" + str(n) + "): " + ", ".join(cols) + "\n"
-    cn.close()
-    return s
+    """Описание таблиц и количества строк — для промпта."""
+    try:
+        c = data_db().cursor()
+        out = []
+        for t in ("cars", "earnings", "cash", "balances"):
+            n = c.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+            cols = [r[1] for r in c.execute("PRAGMA table_info(" + t + ")").fetchall()]
+            out.append("%s (%d): %s" % (t, n, ", ".join(cols)))
+        return "\n".join(out) + "\n"
+    except Exception as e:
+        return "schema error: %s\n" % e
 
 
 def find_owner(q):
-    ql = q.lower()
+    ql = (q or "").lower()
     for k, v in OWNERS.items():
         if k in ql:
             return v
@@ -103,24 +231,20 @@ def extract_sql(response):
 
 
 def read_sql(sql):
-    q = sql.strip()
+    q = (sql or "").strip()
     if not re.match(r"^(SELECT|WITH)\b", q, re.I):
         return None, "Only SELECT allowed"
     if ";" in q.rstrip(";"):
         return None, "Multiple statements not allowed"
-    
-    cn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=3)
-    
     try:
-        cn.execute("PRAGMA query_only=ON")
-        cn.set_authorizer(lambda a, b, c, d, e: sqlite3.SQLITE_DENY if a in WRITE_ACTIONS else sqlite3.SQLITE_OK)
-        cur = cn.execute(q)
+        conn = data_db()
+        conn.set_authorizer(lambda a, b, c, d, e: sqlite3.SQLITE_DENY if a in WRITE_ACTIONS else sqlite3.SQLITE_OK)
+        cur = conn.execute(q)
         cols = [d[0] for d in cur.description or []]
-        return {"columns": cols, "rows": cur.fetchmany(201)[:200]}, None
+        rows = cur.fetchmany(201)[:200]
+        return {"columns": cols, "rows": rows}, None
     except Exception as e:
         return None, str(e)
-    finally:
-        cn.close()
 
 
 def load_fewshot():
@@ -140,9 +264,9 @@ def _llm(msgs, kind):
                 try:
                     r = cl.chat.completions.create(model=m, messages=msgs, timeout=60)
                     return r.choices[0].message.content
-                except:
+                except Exception:
                     pass
-        except:
+        except Exception:
             pass
     if kind == "openrouter" and OR_KEY:
         try:
@@ -152,9 +276,9 @@ def _llm(msgs, kind):
                 try:
                     r = cl.chat.completions.create(model=m, messages=msgs, timeout=90)
                     return r.choices[0].message.content
-                except:
+                except Exception:
                     pass
-        except:
+        except Exception:
             pass
     return None
 
@@ -198,3 +322,10 @@ def ask_ai(q):
     if not ans:
         ans = _llm([{"role": "user", "content": p2}], "openrouter")
     return ans or str(res), sql, sql_rows
+
+
+# прогрев при старте: собираем данные и обновляем файловую базу
+try:
+    data_db()
+except Exception:
+    pass
