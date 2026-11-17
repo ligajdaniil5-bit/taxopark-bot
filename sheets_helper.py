@@ -214,6 +214,24 @@ def get_repairs():
     return out
 
 
+
+def get_statuses():
+    """Все строки «Ввода данных», включая простои: дата, номер, водитель, сумма, причина."""
+    out = []
+    for r in read_sheet("Ввод данных"):
+        date = _date(_col(r, "Дата"))
+        gos = str(_col(r, "Госномер")).strip().upper()
+        if not date or not gos:
+            continue
+        out.append({
+            "date": date,
+            "gos": gos,
+            "driver": str(_col(r, "Водитель")).strip(),
+            "amount": _num(_col(r, "Заработок")),
+            "comment": str(_col(r, "Комментарий")).strip(),
+        })
+    return out
+
 if __name__ == "__main__":
     cars = get_cars()
     earnings = get_earnings()
