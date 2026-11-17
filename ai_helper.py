@@ -11,6 +11,7 @@
 import os
 import re
 import sqlite3
+import threading
 import time
 
 from dotenv import load_dotenv
@@ -85,11 +86,12 @@ OWNERS = {
 }
 
 _data = {"db": None, "built": 0.0}
+_DB_LOCK = threading.Lock()
 
 
 def _build_data_db():
     """Собирает свежую базу из Google Таблицы в память."""
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     c = conn.cursor()
     c.execute("CREATE TABLE cars (plate TEXT COLLATE NOCASE, plate_norm TEXT, owner TEXT, brand TEXT, model TEXT)")
     c.execute("CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, driver TEXT, amount REAL, owner TEXT)")
@@ -167,7 +169,7 @@ def _persist_to_file(mem_conn):
 
 def _build_from_file():
     """Резервный вариант: берём последний сохранённый снимок из файловой базы."""
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     tables = ["cars", "earnings", "cash", "balances", "repairs", "repairs_history"]
     try:
         src = sqlite3.connect(DB_PATH, timeout=10)
@@ -190,53 +192,66 @@ def _build_from_file():
     return conn
 
 
-def data_db():
-    """Соединение с собранной базой; пересобирается раз в DATA_TTL секунд."""
-    now = time.time()
-    if _data["db"] is None or now - _data["built"] > DATA_TTL:
+def _rebuild_locked():
+    """Пересобирает базу. Вызывать только под _DB_LOCK."""
+    try:
+        if _data["db"] is not None:
+            _data["db"].close()
+    except Exception:
+        pass
+    _data["db"] = _build_data_db()
+    _data["built"] = time.time()
+    try:
+        total = _data["db"].execute(
+            "SELECT (SELECT COUNT(*) FROM cars) + (SELECT COUNT(*) FROM earnings)"
+        ).fetchone()[0]
+    except Exception:
+        total = 0
+    if total > 0:
+        # данные пришли — обновляем файловый снимок
+        _persist_to_file(_data["db"])
+    else:
+        # таблица недоступна — работаем по последнему снимку
+        fallback = _build_from_file()
         try:
-            if _data["db"] is not None:
-                _data["db"].close()
-        except Exception:
-            pass
-        _data["db"] = _build_data_db()
-        _data["built"] = now
-        try:
-            total = _data["db"].execute(
+            fb_total = fallback.execute(
                 "SELECT (SELECT COUNT(*) FROM cars) + (SELECT COUNT(*) FROM earnings)"
             ).fetchone()[0]
         except Exception:
-            total = 0
-        if total > 0:
-            # данные пришли — обновляем файловый снимок
-            _persist_to_file(_data["db"])
+            fb_total = 0
+        if fb_total > 0:
+            _data["db"].close()
+            _data["db"] = fallback
+            print("таблица недоступна — использую последний снимок (%d записей)" % fb_total)
         else:
-            # таблица недоступна — работаем по последнему снимку
-            fallback = _build_from_file()
-            try:
-                fb_total = fallback.execute(
-                    "SELECT (SELECT COUNT(*) FROM cars) + (SELECT COUNT(*) FROM earnings)"
-                ).fetchone()[0]
-            except Exception:
-                fb_total = 0
-            if fb_total > 0:
-                _data["db"].close()
-                _data["db"] = fallback
-                print("таблица недоступна — использую последний снимок (%d записей)" % fb_total)
-            else:
-                fallback.close()
-    return _data["db"]
+            fallback.close()
+
+
+def data_db():
+    """Соединение с собранной базой; пересобирается раз в DATA_TTL секунд.
+
+    Соединение создаётся с check_same_thread=False и используется под замком:
+    бот вызывает ask_ai в разных потоках пула, поэтому без этого падает с
+    «SQLite objects created in a thread can only be used in that same thread».
+    """
+    if _data["db"] is not None and time.time() - _data["built"] <= DATA_TTL:
+        return _data["db"]
+    with _DB_LOCK:
+        if _data["db"] is None or time.time() - _data["built"] > DATA_TTL:
+            _rebuild_locked()
+        return _data["db"]
 
 
 def schema():
     """Описание таблиц и количества строк — для промпта."""
     try:
-        c = data_db().cursor()
-        out = []
-        for t in ("cars", "earnings", "cash", "balances", "repairs", "repairs_history"):
-            n = c.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
-            cols = [r[1] for r in c.execute("PRAGMA table_info(" + t + ")").fetchall()]
-            out.append("%s (%d): %s" % (t, n, ", ".join(cols)))
+        with _DB_LOCK:
+            c = data_db().cursor()
+            out = []
+            for t in ("cars", "earnings", "cash", "balances", "repairs", "repairs_history"):
+                n = c.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+                cols = [r[1] for r in c.execute("PRAGMA table_info(" + t + ")").fetchall()]
+                out.append("%s (%d): %s" % (t, n, ", ".join(cols)))
         return "\n".join(out) + "\n"
     except Exception as e:
         return "schema error: %s\n" % e
@@ -276,10 +291,11 @@ def read_sql(sql):
         return None, "Multiple statements not allowed"
     try:
         conn = data_db()
-        conn.set_authorizer(lambda a, b, c, d, e: sqlite3.SQLITE_DENY if a in WRITE_ACTIONS else sqlite3.SQLITE_OK)
-        cur = conn.execute(q)
-        cols = [d[0] for d in cur.description or []]
-        rows = cur.fetchmany(201)[:200]
+        with _DB_LOCK:
+            conn.set_authorizer(lambda a, b, c, d, e: sqlite3.SQLITE_DENY if a in WRITE_ACTIONS else sqlite3.SQLITE_OK)
+            cur = conn.execute(q)
+            cols = [d[0] for d in cur.description or []]
+            rows = cur.fetchmany(201)[:200]
         return {"columns": cols, "rows": rows}, None
     except Exception as e:
         return None, str(e)
