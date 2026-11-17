@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from paths import DB_PATH
-from sheets_helper import get_cars, get_earnings, get_cash, get_balances
+from sheets_helper import get_cars, get_earnings, get_cash, get_balances, get_repairs
 
 OR_KEY = os.getenv("OPENROUTER_KEY", "")
 GQ_KEY = os.getenv("GROQ_KEY", "")
@@ -40,6 +40,7 @@ cars(plate, plate_norm, owner, brand, model)
 earnings(id, date, gos, driver, amount, owner)
 cash(id, date, type, category, sum, account, who, comment)
 balances(id, date, card, account, cash, total)
+repairs(id, date, gos, work, firm, part_cost, work_cost, total, mileage, idle_cost)
 
 Rules:
 1. Generate ONLY one SELECT or WITH ... SELECT query.
@@ -60,7 +61,11 @@ Rules:
 16. In table cash the money column is called "sum", not amount.
 17. gross income of drivers is in earnings.amount.
 
-JOIN: cars.plate = earnings.gos
+18. Repairs are in the repairs table: part_cost + work_cost = total.
+19. To find repair costs for a car use gos (license plate), for example: SELECT SUM(total) FROM repairs WHERE gos = 'K904OX'
+20. Repair dates use the same dd.MM.yyyy format: date LIKE '%.10.2026'
+
+JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos
 """
 
 OWNERS = {
@@ -100,6 +105,13 @@ def _build_data_db():
         c.execute("INSERT INTO balances VALUES (?,?,?,?,?,?)",
                   ("B1", bal["date"], bal["card"], bal["account"], bal["cash"], bal["total"]))
 
+    c.execute("CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)")
+    for i, r in enumerate(get_repairs()):
+        c.execute("INSERT INTO repairs VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  ("R%d" % i, r["date"], r["gos"], r.get("work", ""), r.get("firm", ""),
+                   r.get("part_cost", 0), r.get("work_cost", 0), r.get("total", 0),
+                   r.get("mileage", 0), r.get("idle_cost", 0)))
+
     conn.commit()
     return conn
 
@@ -111,6 +123,7 @@ def _persist_to_file(mem_conn):
         "earnings": "CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT, driver TEXT, amount REAL, owner TEXT)",
         "cash": "CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)",
         "balances": "CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)",
+        "repairs": "CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)",
     }
     try:
         with sqlite3.connect(DB_PATH, timeout=15) as f:
@@ -130,7 +143,7 @@ def _persist_to_file(mem_conn):
 def _build_from_file():
     """Резервный вариант: берём последний сохранённый снимок из файловой базы."""
     conn = sqlite3.connect(":memory:")
-    tables = ["cars", "earnings", "cash", "balances"]
+    tables = ["cars", "earnings", "cash", "balances", "repairs"]
     try:
         src = sqlite3.connect(DB_PATH, timeout=10)
         for t in tables:
@@ -195,7 +208,7 @@ def schema():
     try:
         c = data_db().cursor()
         out = []
-        for t in ("cars", "earnings", "cash", "balances"):
+        for t in ("cars", "earnings", "cash", "balances", "repairs"):
             n = c.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
             cols = [r[1] for r in c.execute("PRAGMA table_info(" + t + ")").fetchall()]
             out.append("%s (%d): %s" % (t, n, ", ".join(cols)))
@@ -287,7 +300,8 @@ def ask_ai(q):
     sc = schema()
     owner = find_owner(q)
     hint = "Owner mentioned: " + owner + "\n" if owner else ""
-    user_msg = "Schema:\n" + sc + "\nJOIN: cars.plate = earnings.gos\n" + hint + "Question: " + q
+    joins = "JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos\n"
+    user_msg = "Schema:\n" + sc + "\n" + joins + hint + "Question: " + q
 
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     for ex_q, ex_sql in load_fewshot():
