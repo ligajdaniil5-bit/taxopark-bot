@@ -65,6 +65,7 @@ Rules:
 17. gross income of drivers is in earnings.amount.
 
 17a. Plates may be written in any case: use LOWER(plate) = LOWER('x') or rely on COLLATE NOCASE.
+17b. NEVER change letters in a plate. If a plate hint is given, copy it exactly. If the hint lists two plates, ask which one is meant.
 18. Repairs are in the repairs table: part_cost + work_cost = total.
 19. To find repair costs for a car use gos (license plate), for example: SELECT SUM(total) FROM repairs WHERE gos = 'K904OX'
 20. Repair dates use the same dd.MM.yyyy format: date LIKE '%.10.2026'
@@ -320,10 +321,31 @@ def _llm(msgs, kind):
     return None
 
 
+
+def find_plate(q):
+    """Ищет номер машины в вопросе по трём цифрам и возвращает точное значение."""
+    digits = re.findall(r"\d{3}", q or "")
+    if not digits:
+        return None
+    try:
+        plates = [r[0] for r in data_db().execute("SELECT plate FROM cars").fetchall()]
+    except Exception:
+        return None
+    for d in digits:
+        cands = [p for p in plates if d in p]
+        if len(cands) == 1:
+            return cands[0]
+        if len(cands) > 1:
+            return " или ".join(cands)   # подскажем варианты
+    return None
+
 def ask_ai(q):
     sc = schema()
     owner = find_owner(q)
     hint = "Owner mentioned: " + owner + "\n" if owner else ""
+    plate = find_plate(q)
+    if plate:
+        hint += "Plate mentioned: " + plate + " (use EXACTLY this value, do not change letters)\n"
     joins = "JOIN: cars.plate = earnings.gos AND cars.plate = repairs.gos AND cars.plate = repairs_history.plate\n"
     user_msg = "Schema:\n" + sc + "\n" + joins + hint + "Question: " + q
 
