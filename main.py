@@ -465,13 +465,6 @@ async def handle_feedback(callback: CallbackQuery, callback_data: FeedbackCB):
     await callback.answer("Спасибо! Оценка сохранена.")
 
 
-@dp.message(Command("ai"))
-@dp.message(F.text & ~F.text.startswith("/"))
-async def on_text(m: Message):
-    if not is_owner(m.from_user.id) or not m.text:
-        return
-    question = m.text.strip()
-
 @dp.message(F.voice)
 async def on_voice(m: Message):
     """Голосовой вопрос: расшифровываем и отвечаем как на обычный текст."""
@@ -517,6 +510,12 @@ async def on_voice(m: Message):
     await m.answer(answer[:4000])
 
 
+@dp.message(Command("ai"))
+@dp.message(F.text & ~F.text.startswith("/"))
+async def on_text(m: Message):
+    if not is_owner(m.from_user.id) or not m.text:
+        return
+    question = m.text.strip()
     # отчёт по простоям: «сколько машин стояло», «причины простоя», «запил»
     try:
         from aiogram.types import FSInputFile as _FSI
