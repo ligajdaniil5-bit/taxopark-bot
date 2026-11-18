@@ -89,7 +89,7 @@ def read_sheet(sheet_name):
     )
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "taxopark-bot/2"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = resp.read().decode("utf-8-sig")
         head = data[:200].lower()
         if "<html" in head or "<!doctype" in head:
