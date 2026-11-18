@@ -516,6 +516,21 @@ async def on_voice(m: Message):
     await m.answer(answer[:4000])
 
 
+@dp.message(Command("update"))
+@dp.message(F.text.regexp(r"(?i)^\s*(обнови|обновить|update)\s*$"))
+async def on_update(m: Message):
+    """Самообновление: скачать код с GitHub и перезапустить контейнер."""
+    if not is_owner(m.from_user.id):
+        return
+    await m.answer("🔄 Обновляюсь с GitHub…")
+    try:
+        import self_update
+        n, files = await asyncio.to_thread(self_update.apply_update)
+        await m.answer("✅ Обновлено файлов: %d\nПерезапускаюсь…" % n)
+        await asyncio.to_thread(self_update.restart_self)
+    except Exception as e:
+        await m.answer("❌ Не удалось обновиться: %s" % str(e)[:300])
+
 @dp.message(Command("ai"))
 @dp.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
