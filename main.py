@@ -487,6 +487,12 @@ async def on_voice(m: Message):
 
     try:
         from aiogram.types import FSInputFile as _FSI
+        from income_report import wants_income_report as _winc, build_income_image as _binc
+        if _winc(text):
+            _p, _c = await asyncio.to_thread(_binc, text)
+            if _p:
+                await m.answer_photo(_FSI(_p), caption=_c[:1000])
+                return
         from idle_report import wants_idle_report, build_idle_image
         if wants_idle_report(text):
             path, caption = await asyncio.to_thread(build_idle_image, text)
@@ -516,6 +522,18 @@ async def on_text(m: Message):
     if not is_owner(m.from_user.id) or not m.text:
         return
     question = m.text.strip()
+    # отчёт «аренда и зарплата по собственникам»
+    try:
+        from aiogram.types import FSInputFile as _FSI3
+        from income_report import wants_income_report, build_income_image
+        if wants_income_report(question):
+            path, caption = await asyncio.to_thread(build_income_image, question)
+            if path:
+                await m.answer_photo(_FSI3(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[income]", e)
+
     # отчёт по простоям: «сколько машин стояло», «причины простоя», «запил»
     try:
         from aiogram.types import FSInputFile as _FSI
