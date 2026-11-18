@@ -215,6 +215,30 @@ def get_repairs():
 
 
 
+def get_shifts():
+    """Смены из листа «Оп_Смены»: выручка, аренда, зарплата, начислено, водителю."""
+    out = []
+    for r in read_sheet("Оп_Смены"):
+        date = _date(_col(r, "Дата"))
+        gos = str(_col(r, "Госномер")).strip().upper()
+        if not date or not gos:
+            continue
+        out.append({
+            "id": str(_col(r, "ID смены")).strip(),
+            "date": date,
+            "gos": gos,
+            "owner": str(_col(r, "Владелец")).strip(),
+            "driver": str(_col(r, "Водитель")).strip(),
+            "status": str(_col(r, "Статус дня")).strip(),
+            "revenue": _num(_col(r, "Выручка водителя, ₽", "Выручка водителя")),
+            "rent": _num(_col(r, "Аренда, ₽", "Аренда")),
+            "salary": _num(_col(r, "Зарплата, ₽", "Зарплата")),
+            "accrued": _num(_col(r, "Начислено по машине, ₽", "Начислено по машине")),
+            "driver_pay": _num(_col(r, "Водителю, ₽", "Водителю")),
+        })
+    return out
+
+
 def get_statuses():
     """Все строки «Ввода данных», включая простои: дата, номер, водитель, сумма, причина."""
     out = []
@@ -242,4 +266,6 @@ if __name__ == "__main__":
     print("заработков:", len(earnings), "| сумма:", int(sum(e["amount"] for e in earnings)))
     print("касса:", len(cash), "| приход:", int(sum(c["sum"] for c in cash if c["type"].lower().startswith("приход"))))
     print("ремонтов:", len(rep), "| на сумму:", int(sum(x["total"] for x in rep)))
+    sh = get_shifts()
+    print("смен:", len(sh), "| аренда:", int(sum(x["rent"] for x in sh)), "| зарплата:", int(sum(x["salary"] for x in sh)))
     print("баланс:", bal)
