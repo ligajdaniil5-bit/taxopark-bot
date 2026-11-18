@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from paths import DB_PATH
-from sheets_helper import get_cars, get_earnings, get_cash, get_balances, get_repairs
+from sheets_helper import get_cars, get_earnings, get_cash, get_balances, get_repairs, get_shifts
 
 HISTORY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repairs_history.csv")
 
@@ -43,6 +43,7 @@ cars(plate, plate_norm, owner, brand, model)
 earnings(id, date, gos, driver, amount, owner)
 cash(id, date, type, category, sum, account, who, comment)
 balances(id, date, card, account, cash, total)
+shifts(id, date, gos, owner, driver, status, revenue, rent, salary, accrued, driver_pay)
 repairs(id, date, gos, work, firm, part_cost, work_cost, total, mileage, idle_cost)
 repairs_history(id, plate, date, work, part_cost, work_cost, total, mileage)
 
@@ -71,6 +72,7 @@ Rules:
 19. To find repair costs for a car use gos (license plate), for example: SELECT SUM(total) FROM repairs WHERE gos = 'K904OX'
 20. Repair dates use the same dd.MM.yyyy format: date LIKE '%.10.2026'
 
+17c. shifts = смены: revenue — выручка машины за день, rent — аренда, salary — зарплата (% от выручки), accrued = rent + salary, driver_pay — остаток водителю, owner — собственник машины.
 21. repairs = официальные ремонты из таблицы (с суммами, учитываются в деньгах).
 22. repairs_history = подробная история работ из карточек машин (может не совпадать с repairs, суммы считать НЕ по ней).
 23. На вопросы «что делали с машиной», «когда был ремонт», «какой пробег» используй repairs_history.
@@ -125,6 +127,13 @@ def _build_data_db():
                    r.get("mileage", 0), r.get("idle_cost", 0)))
 
     # история ремонтов из файла карточек
+    c.execute("CREATE TABLE shifts (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, owner TEXT, driver TEXT, status TEXT, revenue REAL, rent REAL, salary REAL, accrued REAL, driver_pay REAL)")
+    for i, sh_ in enumerate(get_shifts()):
+        c.execute("INSERT INTO shifts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                  ("SH%d" % i, sh_["date"], sh_["gos"], sh_.get("owner", ""), sh_.get("driver", ""),
+                   sh_.get("status", ""), sh_.get("revenue", 0), sh_.get("rent", 0),
+                   sh_.get("salary", 0), sh_.get("accrued", 0), sh_.get("driver_pay", 0)))
+
     c.execute("CREATE TABLE repairs_history (id TEXT, plate TEXT COLLATE NOCASE, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)")
     if os.path.exists(HISTORY_CSV):
         import csv as _csv
@@ -149,6 +158,7 @@ def _persist_to_file(mem_conn):
         "earnings": "CREATE TABLE earnings (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, driver TEXT, amount REAL, owner TEXT)",
         "cash": "CREATE TABLE cash (id TEXT, date TEXT, type TEXT, category TEXT, sum REAL, account TEXT, who TEXT, comment TEXT)",
         "balances": "CREATE TABLE balances (id TEXT, date TEXT, card REAL, account REAL, cash REAL, total REAL)",
+        "shifts": "CREATE TABLE shifts (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, owner TEXT, driver TEXT, status TEXT, revenue REAL, rent REAL, salary REAL, accrued REAL, driver_pay REAL)",
         "repairs": "CREATE TABLE repairs (id TEXT, date TEXT, gos TEXT COLLATE NOCASE, work TEXT, firm TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL, idle_cost REAL)",
         "repairs_history": "CREATE TABLE repairs_history (id TEXT, plate TEXT COLLATE NOCASE, date TEXT, work TEXT, part_cost REAL, work_cost REAL, total REAL, mileage REAL)",
     }
@@ -170,7 +180,7 @@ def _persist_to_file(mem_conn):
 def _build_from_file():
     """Резервный вариант: берём последний сохранённый снимок из файловой базы."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
-    tables = ["cars", "earnings", "cash", "balances", "repairs", "repairs_history"]
+    tables = ["cars", "earnings", "cash", "balances", "shifts", "repairs", "repairs_history"]
     try:
         src = sqlite3.connect(DB_PATH, timeout=10)
         for t in tables:
@@ -248,7 +258,7 @@ def schema():
         with _DB_LOCK:
             c = data_db().cursor()
             out = []
-            for t in ("cars", "earnings", "cash", "balances", "repairs", "repairs_history"):
+            for t in ("cars", "earnings", "cash", "balances", "shifts", "repairs", "repairs_history"):
                 n = c.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
                 cols = [r[1] for r in c.execute("PRAGMA table_info(" + t + ")").fetchall()]
                 out.append("%s (%d): %s" % (t, n, ", ".join(cols)))
