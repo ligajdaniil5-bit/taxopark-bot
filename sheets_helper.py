@@ -16,8 +16,11 @@ import csv
 import io
 import os
 import re
+import threading
 import urllib.parse
 import urllib.request
+
+HARD_TIMEOUT = 25  # секунд на один лист (жёсткий дедлайн)
 from datetime import datetime
 
 # «Аня, тебе сюда» — рабочая таблица
@@ -89,8 +92,23 @@ def read_sheet(sheet_name):
     )
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "taxopark-bot/2"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = resp.read().decode("utf-8-sig")
+        box = {}
+
+        def _fetch():
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    box["data"] = resp.read()
+            except Exception as e:  # noqa: BLE001
+                box["err"] = e
+
+        th = threading.Thread(target=_fetch, daemon=True)
+        th.start()
+        th.join(HARD_TIMEOUT)
+        if th.is_alive():
+            raise TimeoutError("лист «%s»: нет данных за %d с" % (sheet_name, HARD_TIMEOUT))
+        if "err" in box:
+            raise box["err"]
+        data = box["data"].decode("utf-8-sig")
         head = data[:200].lower()
         if "<html" in head or "<!doctype" in head:
             print("Ошибка доступа к листу «%s»: таблица не открыта по ссылке" % sheet_name)
