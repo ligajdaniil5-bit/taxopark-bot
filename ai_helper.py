@@ -26,7 +26,7 @@ OR_KEY = os.getenv("OPENROUTER_KEY", "")
 GQ_KEY = os.getenv("GROQ_KEY", "")
 
 # сколько секунд держать собранную базу в памяти
-DATA_TTL = int(os.getenv("DATA_TTL", "120"))
+DATA_TTL = int(os.getenv("DATA_TTL", "900"))
 
 WRITE_ACTIONS = {
     sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
@@ -204,6 +204,7 @@ def _build_from_file():
 
 def _rebuild_locked():
     """Пересобирает базу. Вызывать только под _DB_LOCK."""
+    t0 = time.time()
     try:
         if _data["db"] is not None:
             _data["db"].close()
@@ -211,6 +212,7 @@ def _rebuild_locked():
         pass
     _data["db"] = _build_data_db()
     _data["built"] = time.time()
+    print("[data] пересборка за %.1f с" % (time.time() - t0))
     try:
         total = _data["db"].execute(
             "SELECT (SELECT COUNT(*) FROM cars) + (SELECT COUNT(*) FROM earnings)"
@@ -413,5 +415,21 @@ def ask_ai(q):
 # прогрев при старте: собираем данные и обновляем файловую базу
 try:
     data_db()
+except Exception:
+    pass
+
+
+# warm-up: собираем базу в фоне сразу после старта, чтобы первый вопрос не ждал
+def _warm_up():
+    try:
+        data_db()
+        print("[data] прогрев завершён")
+    except Exception as e:
+        print("[data] прогрев не удался: %s" % e)
+
+
+try:
+    import threading as _threading
+    _threading.Thread(target=_warm_up, daemon=True).start()
 except Exception:
     pass
