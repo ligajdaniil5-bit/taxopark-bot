@@ -239,6 +239,28 @@ def _rebuild_locked():
             fallback.close()
 
 
+
+
+def _start_bg_rebuild():
+    """Запускает пересборку в фоне (одна за раз)."""
+    if _data.get("bg_running"):
+        return
+    _data["bg_running"] = True
+    _data["bg_started"] = time.time()
+
+    def _worker():
+        try:
+            with _DB_LOCK:
+                _rebuild_locked()
+        except Exception as e:  # noqa: BLE001
+            print("[data] фоновая пересборка не удалась: %s" % e)
+        finally:
+            _data["bg_running"] = False
+
+    import threading
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def data_db():
     """Соединение с собранной базой; пересобирается раз в DATA_TTL секунд.
 
@@ -248,10 +270,18 @@ def data_db():
     """
     if _data["db"] is not None and time.time() - _data["built"] <= DATA_TTL:
         return _data["db"]
-    with _DB_LOCK:
-        if _data["db"] is None or time.time() - _data["built"] > DATA_TTL:
-            _rebuild_locked()
-        return _data["db"]
+    # Никогда не блокируем ответ ожиданием сети: если данных ещё нет —
+    # берём последний снимок с диска и запускаем обновление в фоне.
+    if _data["db"] is None:
+        try:
+            _data["db"] = _build_from_file()
+            _data["built"] = time.time()
+            print("[data] старт из файлового снимка")
+        except Exception as e:
+            print("[data] снимок не прочитан: %s" % e)
+    if time.time() - max(_data["built"], _data["bg_started"]) > DATA_TTL:
+        _start_bg_rebuild()
+    return _data["db"]
 
 
 def schema():
