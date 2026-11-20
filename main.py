@@ -154,10 +154,10 @@ def is_owner(uid):
     return uid in OWNERS
 
 
-# Память разговора: user_id → [(вопрос, ответ), ...] (последние 8 пар)
+# Память разговора: user_id -> [(вопрос, ответ), ...] (последние 8 пар)
 _chat_history = {}
 
-# Слова, после которых вопрос считается «аналитическим» → идём в SQL, а не в живой чат
+# Слова, после которых вопрос считается «аналитическим» -> идём в SQL, а не в живой чат
 _ANALYTIC_RE = re.compile(
     r"сколько|итого|сумм|месяц|недел|период|средн|топ|рейтинг|статистик|"
     r"сравн|динамик|за год|за день|за \d|процент|доля|расчит",
@@ -166,9 +166,9 @@ _ANALYTIC_RE = re.compile(
 
 
 def wants_chat(text):
-    """True — обычная болтовня про машины; False — запрос точных цифр (SQL)."""
+    """True — обычный разговор про машины; False — запрос точных цифр (SQL)."""
     t = (text or "").strip()
-    if len(t) > 220:          # длинный текст с цифрами — скорее аналитика
+    if len(t) > 220:
         return False
     return not _ANALYTIC_RE.search(t)
 
@@ -484,24 +484,123 @@ async def handle_feedback(callback: CallbackQuery, callback_data: FeedbackCB):
     await callback.answer("Спасибо! Оценка сохранена.")
 
 
+@dp.message(F.voice)
+async def on_voice(m: Message):
+    """Голосовой вопрос: расшифровываем и отвечаем как на обычный текст."""
+    if not is_owner(m.from_user.id):
+        return
+    await m.answer("🎤 Расшифровываю…")
+    try:
+        import io as _io
+        from voice import transcribe
+        buf = _io.BytesIO()
+        await bot.download(m.voice, destination=buf)
+        text = await asyncio.to_thread(transcribe, buf.getvalue())
+    except Exception as e:
+        await m.answer("Не удалось распознать голос: " + str(e)[:200])
+        return
+    if not text:
+        await m.answer("Не разобрал речь, попробуйте ещё раз.")
+        return
+    await m.answer("🎤 «" + text + "»")
+
+    try:
+        from aiogram.types import FSInputFile as _FSI
+        from income_report import wants_income_report as _winc, build_income_image as _binc
+        if _winc(text):
+            _p, _c = await asyncio.to_thread(_binc, text)
+            if _p:
+                await m.answer_photo(_FSI(_p), caption=_c[:1000])
+                return
+        from idle_report import wants_idle_report, build_idle_image
+        if wants_idle_report(text):
+            path, caption = await asyncio.to_thread(build_idle_image, text)
+            if path:
+                await m.answer_photo(_FSI(path), caption=caption[:1000])
+                return
+        from earnings_report import wants_image_report, build_earnings_image
+        if wants_image_report(text):
+            path, caption = await asyncio.to_thread(build_earnings_image, text)
+            if path:
+                await m.answer_photo(_FSI(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[voice report]", e)
+
+    try:
+        result = await asyncio.to_thread(ask_ai, text)
+        answer = result[0] if isinstance(result, tuple) and result else str(result)
+    except Exception as e:
+        answer = "Ошибка обработки: " + str(e)[:200]
+    await m.answer(answer[:4000])
+
+
+@dp.message(Command("update"))
+@dp.message(F.text.regexp(r"(?i)^\s*(обнови|обновить|update)\s*$"))
+async def on_update(m: Message):
+    """Самообновление: скачать код с GitHub и перезапустить контейнер."""
+    if not is_owner(m.from_user.id):
+        return
+    await m.answer("🔄 Обновляюсь с GitHub…")
+    try:
+        import self_update
+        n, files = await asyncio.to_thread(self_update.apply_update)
+        await m.answer("✅ Обновлено файлов: %d\nПерезапускаюсь…" % n)
+        await asyncio.to_thread(self_update.restart_self)
+    except Exception as e:
+        await m.answer("❌ Не удалось обновиться: %s" % str(e)[:300])
+
 @dp.message(Command("ai"))
 @dp.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
     if not is_owner(m.from_user.id) or not m.text:
         return
     question = m.text.strip()
+    # отчёт «аренда и зарплата по собственникам»
+    try:
+        from aiogram.types import FSInputFile as _FSI3
+        from income_report import wants_income_report, build_income_image
+        if wants_income_report(question):
+            path, caption = await asyncio.to_thread(build_income_image, question)
+            if path:
+                await m.answer_photo(_FSI3(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[income]", e)
+
+    # отчёт по простоям: «сколько машин стояло», «причины простоя», «запил»
+    try:
+        from aiogram.types import FSInputFile as _FSI
+        from idle_report import wants_idle_report, build_idle_image
+        if wants_idle_report(question):
+            path, caption = await asyncio.to_thread(build_idle_image, question)
+            if path:
+                await m.answer_photo(_FSI(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[idle]", e)
+
+    # отчёт картинкой: «распиши кто сколько заработал», «скрин», «по водителям»
+    try:
+        from aiogram.types import FSInputFile
+        from earnings_report import wants_image_report, build_earnings_image
+        if wants_image_report(question):
+            path, caption = await asyncio.to_thread(build_earnings_image, question)
+            if path:
+                await m.answer_photo(FSInputFile(path), caption=caption[:1000])
+                return
+    except Exception as e:
+        print("[report]", e)
 
     # Живой разговор: если это не запрос точной аналитики — отвечаем по-человечески,
     # с памятью последних сообщений. Точные суммы за период идут в SQL-ветку ниже.
     if wants_chat(question):
-        await m.answer("💬 …")
         try:
             prev = _chat_history.get(m.from_user.id, [])
             answer = await asyncio.to_thread(
                 chat_reply, question, OWNERS.get(m.from_user.id), prev
             )
-            prev = (prev + [(question, answer)])[-8:]
-            _chat_history[m.from_user.id] = prev
+            _chat_history[m.from_user.id] = (prev + [(question, answer)])[-8:]
         except Exception:
             logging.exception("chat_reply")
             answer = "Не получилось подумать 🤷 Попробуй ещё раз."
